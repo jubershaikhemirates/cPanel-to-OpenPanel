@@ -8,7 +8,6 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-
 ###############################################################
 # HELPER FUNCTIONS
 
@@ -25,7 +24,6 @@ handle_error() {
     log "Error occurred in function '$1' on line $2"
     exit 1
 }
-
 
 trap 'handle_error "${FUNCNAME[-1]}" "$LINENO"' ERR
 
@@ -44,66 +42,21 @@ install_dependencies() {
     log "Dependencies installed successfully."
 }
 
-validate_plan_exists(){
-    check_plan_sql=$(mysql -Dpanel -se "SELECT COUNT(*) FROM plans WHERE name = '$plan_name';")
-    
-    # Check the result
-    if [ "$check_plan_sql" -gt 0 ]; then
-        log "Plan name '$plan_name' exists in the plans table."
-    else
-        log "Plan name '$plan_name' does not exist in the plans table."
-        exit 1
-    fi
-}
-
-
-###############################################################
-
-
-
-
-
-
-
-
-
-
-
-
-
 ###############################################################
 # MAIN FUNCTIONS
 
 check_if_valid_cp_backup(){
     local backup_location="$1"
-
-    # Identify the backup type
     local backup_filename=$(basename "$backup_location")
     local extraction_command=""
 
     case "$backup_filename" in
-        cpmove-*.tar.gz)
-            log "Identified cpmove backup"
+        cpmove-*.tar.gz | backup-*.tar.gz | *.tar.gz | *.tgz | *.tar)
+            log "Identified valid cPanel backup format: $backup_filename"
             extraction_command="tar -xzf"
-            ;;
-        backup-*.tar.gz)
-            log "Identified full or partial cPanel backup"
-            extraction_command="tar -xzf"
-            ;;
-        *.tar.gz)
-            log "Identified gzipped tar backup"
-            extraction_command="tar -xzf"
-            ;;
-        *.tgz)
-            log "Identified tgz backup"
-            extraction_command="tar -xzf"
-            ;;
-        *.tar)
-            log "Identified tar backup"
-            extraction_command="tar -xf"
             ;;
         *.zip)
-            log "Identified zip backup"
+            log "Identified zip backup format: $backup_filename"
             extraction_command="unzip"
             ;;
         *)
@@ -119,11 +72,6 @@ extract_cpanel_backup() {
     local backup_dir="$2"
     log "Identifying and extracting backup from $backup_location to $backup_dir"
     mkdir -p "$backup_dir"
-
-
-    #TODO: check if server has enough space to unpack it and then to copy.
-    # should be free on /home about 80% of the compressed archive and 80% on tmp.
-    # in case tmp is toosmall, use /home  but then at least 160% of archive needs to be available.
 
     # Extract the backup
     if [ "$extraction_command" = "unzip" ]; then
@@ -147,8 +95,6 @@ extract_cpanel_backup() {
     log "Contents of extracted backup:"
     find "$backup_dir" -type f | sed 's/^/  /'
 }
-
-
 
 # Function to locate important directories in the extracted backup
 locate_backup_directories() {
@@ -175,8 +121,6 @@ locate_backup_directories() {
     log "Home directory: $homedir"
     log "MySQL directory: $mysqldir"
 }
-
-
 
 # Function to parse cPanel backup metadata
 parse_cpanel_metadata() {
@@ -208,9 +152,7 @@ parse_cpanel_metadata() {
     log "Email: $cpanel_email"
     log "Main Domain: $main_domain"
     log "PHP Version: $php_version"
-
 }
-
 
 check_if_user_exists(){   
     cpanel_username="${backup_filename##*_}"
@@ -222,12 +164,11 @@ check_if_user_exists(){
         existing_user=$(opencli user-list --json | jq -r ".[] | select(.username == \"$cpanel_username\") | .id")
     fi
     if [ -z "$existing_user" ]; then
-        log "Username $cpanel_username is available, staring import.."
+        log "Username $cpanel_username is available, starting import.."
     else
         log "FATAL ERROR: $cpanel_username already exists."
         exit 1
     fi
-
 }
 
 # Function to create or get user
@@ -385,36 +326,14 @@ restore_cron() {
     local username="$2"
 
     log "Restoring cron jobs for user $username"
-    if [ -f "$backup_dir/cron/$username" ]; then
+    if [ -f "$backup_dir/cron/crontab" ]; then
         crontab -u "$username" "$backup_dir/cron/crontab"
-        docker cp $backup_dir/cron/$username $username:/var/spool/cron/crontabs/$username
-        docker exec $username bash -c "service cron restart"
-
-        # TODO: start cron service for user
-        #docker exec $username sed CRON_STATUS="on" /etc/entrypoint.sh'
-
     else
         log "No cron jobs found to restore"
     fi
 }
 
 ###############################################################
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # Main execution
 main() {
     local backup_location=""
@@ -439,25 +358,17 @@ main() {
         usage
     fi
 
-
     ################# PRE-RUN CHECKS
     check_if_valid_cp_backup "$backup_location"
     check_if_user_exists
-    validate_plan_exists
     install_dependencies
-
+    validate_plan_exists "$plan_name"
 
     # Create a unique temporary directory
     backup_dir=$(mktemp -d /tmp/cpanel_import_XXXXXX)
     log "Created temporary directory: $backup_dir"
 
-
-
-         ## RUN PROCESS
-
-         ## POST-RUN CHECKS
-
-    
+    ################# RUN PROCESS
     # Extract backup
     extract_cpanel_backup "$backup_location" "$backup_dir"
 
@@ -465,20 +376,13 @@ main() {
     locate_backup_directories "$backup_dir"
 
     # Parse cPanel metadata
-    parse_cpanel_metadata "$backup_dir"  #TODO: extract single file and get data from it!
+    parse_cpanel_metadata "$backup_dir"
 
     # Create user
     create_new_user "$cpanel_username" "$cpanel_password" "$cpanel_email" "$plan_name"
 
     # Restore PHP version
     restore_php_version "$cpanel_username" "$php_version"
-
-    # Restore Domains and Websites
-    restore_website() {
-        local domain="$1"
-        local path="$2"
-        restore_domains "$cpanel_username" "$domain" "$path"
-    }
 
     # Restore main domain
     if [ -d "$homedir/public_html" ]; then
@@ -514,6 +418,9 @@ main() {
     log "Fixing file permissions for user $cpanel_username"
     opencli files-fix_permissions "$cpanel_username" "/home/$cpanel_username"
 
+    ################# POST-RUN CHECKS
+    # Add any additional post-run checks here if necessary
+
     # Cleanup
     log "Cleaning up temporary files"
     rm -rf "$backup_dir"
@@ -521,8 +428,6 @@ main() {
     log "Restore completed successfully."
 }
 
-
 ###############################################################
-
 # Run the main function
 main "$@"
